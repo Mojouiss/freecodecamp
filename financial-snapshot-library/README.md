@@ -2,16 +2,26 @@
 
 A robust, high-performance Python library for capturing snapshots of live financial positions from Apache Kafka and storing them in SQL databases with optimal performance and reliability.
 
+Built with industry-standard libraries: **Pydantic** for configuration validation, **confluent-kafka** for high-performance message consumption, and **pandas** for efficient data processing.
+
 ## Features
 
 - **Reliable Data Capture**: Consume financial position records from Kafka every 5 minutes without data loss
 - **High Performance**: Batch processing with connection pooling for minimal database pressure
-- **Data Quality**: Built-in validation and deduplication
-- **Flexible Configuration**: Support for JSON files, environment variables, or programmatic configuration
+- **Data Quality**: Built-in validation and deduplication using pandas
+- **Flexible Configuration**: Pydantic-based configuration with JSON files, environment variables, or programmatic setup
 - **Multiple Database Support**: PostgreSQL, MySQL, and SQL Server
 - **Robust Error Handling**: Automatic retries with exponential backoff
 - **Comprehensive Logging**: Structured logging with performance metrics
 - **Production Ready**: Battle-tested with comprehensive unit tests
+
+## Technology Stack
+
+- **Pydantic 2.5+**: Type-safe configuration with automatic validation
+- **confluent-kafka 2.3+**: High-performance C-based Kafka client
+- **pandas 2.1+**: Efficient data manipulation and batch operations
+- **SQLAlchemy 2.0+**: Database abstraction and connection pooling
+- **pyodbc 5.0+**: SQL Server connectivity
 
 ## Architecture
 
@@ -102,6 +112,26 @@ result = manager.run_once()
 print(f"Captured {result['records_written']} records in {result['duration_seconds']:.2f}s")
 ```
 
+### Using pandas DataFrames
+
+```python
+from financial_snapshot.messaging.kafka_consumer import FinancialPositionConsumer
+from financial_snapshot.storage.sql_writer import FinancialPositionWriter
+from financial_snapshot.core.config import Config
+
+config = Config.from_file("config/config.json")
+
+# Consume as DataFrame
+with FinancialPositionConsumer(config.kafka) as consumer:
+    df = consumer.consume_batch_as_dataframe(timeout_ms=10000)
+    print(f"Consumed {len(df)} records as DataFrame")
+    print(df.head())
+
+# Write DataFrame directly
+with FinancialPositionWriter(config.database) as writer:
+    writer.write_dataframe(df, snapshot_id="snapshot_123")
+```
+
 ## Configuration
 
 ### Configuration File (config.json)
@@ -141,28 +171,34 @@ print(f"Captured {result['records_written']} records in {result['duration_second
 
 ### Environment Variables
 
+Pydantic-based configuration with automatic environment variable loading:
+
 ```bash
 # Kafka Configuration
-export FS_KAFKA_BOOTSTRAP_SERVERS="kafka1:9092,kafka2:9092"
-export FS_KAFKA_TOPIC="financial_positions"
-export FS_KAFKA_GROUP_ID="financial_snapshot_consumer"
+export FS_KAFKA__BOOTSTRAP_SERVERS="kafka1:9092,kafka2:9092"
+export FS_KAFKA__TOPIC="financial_positions"
+export FS_KAFKA__GROUP_ID="financial_snapshot_consumer"
 
 # Database Configuration
-export FS_DB_DRIVER="postgresql"
-export FS_DB_HOST="db.example.com"
-export FS_DB_PORT="5432"
-export FS_DB_NAME="financial_db"
-export FS_DB_USERNAME="postgres"
-export FS_DB_PASSWORD="your_password"
-export FS_DB_TABLE="financial_positions"
-export FS_DB_BATCH_SIZE="1000"
+export FS_DATABASE__DRIVER="postgresql"
+export FS_DATABASE__HOST="db.example.com"
+export FS_DATABASE__PORT="5432"
+export FS_DATABASE__DATABASE="financial_db"
+export FS_DATABASE__USERNAME="postgres"
+export FS_DATABASE__PASSWORD="your_password"
+export FS_DATABASE__TABLE_NAME="financial_positions"
+export FS_DATABASE__BATCH_SIZE="1000"
 
 # Snapshot Configuration
-export FS_SNAPSHOT_INTERVAL="300"
+export FS_SNAPSHOT__INTERVAL_SECONDS="300"
 
 # Logging Configuration
-export FS_LOG_LEVEL="INFO"
-export FS_LOG_FILE="logs/snapshot.log"
+export FS_LOGGING__LEVEL="INFO"
+export FS_LOGGING__LOG_FILE="logs/snapshot.log"
+
+# Load from environment
+from financial_snapshot import Config
+config = Config.from_env()  # Auto-loads all FS_* variables
 ```
 
 ## Database Schema
