@@ -35,7 +35,10 @@ setup(
     ],
     python_requires=">=3.8",
     install_requires=[
-        "kafka-python>=2.0.2",
+        "confluent-kafka>=2.3.0",
+        "pydantic>=2.5.0",
+        "pydantic-settings>=2.1.0",
+        "pandas>=2.1.0",
         "sqlalchemy>=2.0.0",
         "psycopg2-binary>=2.9.0",
         "pymysql>=1.1.1",

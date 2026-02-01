@@ -1,8 +1,8 @@
 """
-SQL database writer for financial positions.
+SQL database writer for financial positions using pandas.
 
 Provides efficient, reliable storage with connection pooling, batch inserts,
-and transaction management.
+and transaction management using pandas for data processing.
 """
 
 from typing import List, Dict, Any, Optional
@@ -16,12 +16,14 @@ from sqlalchemy import (
     DateTime,
     MetaData,
     Index,
+    text,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import QueuePool
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
 import time
+import pandas as pd
 
 from ..core.config import DatabaseConfig
 from ..utils.logger import SnapshotLogger
@@ -29,7 +31,7 @@ from ..utils.logger import SnapshotLogger
 
 class FinancialPositionWriter:
     """
-    SQL database writer for financial position records.
+    SQL database writer for financial position records using pandas.
     
     Handles batch inserts, connection pooling, and transaction management
     for optimal database performance and reliability.
@@ -161,46 +163,23 @@ class FinancialPositionWriter:
             return 0
         
         start_time = time.time()
-        total_written = 0
         
         try:
-            # Process in batches
-            batch_size = self.config.batch_size
+            # Convert records to DataFrame
+            df = self._records_to_dataframe(records, snapshot_id)
             
-            with self.engine.begin() as connection:
-                for i in range(0, len(records), batch_size):
-                    batch = records[i:i + batch_size]
-                    
-                    # Transform records for insertion
-                    insert_data = []
-                    for record in batch:
-                        value = record.get("value", {})
-                        
-                        row = {
-                            "snapshot_id": snapshot_id,
-                            "position_id": value.get("position_id", ""),
-                            "account_id": value.get("account_id", ""),
-                            "symbol": value.get("symbol", ""),
-                            "quantity": float(value.get("quantity", 0)),
-                            "market_value": float(value.get("market_value")) if value.get("market_value") is not None else None,
-                            "cost_basis": float(value.get("cost_basis")) if value.get("cost_basis") is not None else None,
-                            "unrealized_pnl": float(value.get("unrealized_pnl")) if value.get("unrealized_pnl") is not None else None,
-                            "kafka_partition": record.get("partition"),
-                            "kafka_offset": record.get("offset"),
-                            "kafka_timestamp": datetime.fromtimestamp(record.get("timestamp", 0) / 1000) if record.get("timestamp") else None,
-                            "consumed_at": datetime.fromisoformat(record.get("consumed_at")) if record.get("consumed_at") else None,
-                        }
-                        insert_data.append(row)
-                    
-                    # Execute batch insert
-                    connection.execute(self.table.insert(), insert_data)
-                    total_written += len(insert_data)
-                    
-                    self.logger.debug(
-                        "Batch inserted",
-                        batch_number=i // batch_size + 1,
-                        record_count=len(insert_data),
-                    )
+            # Write to database using pandas
+            total_written = len(df)
+            
+            # Use pandas to_sql with chunking for large datasets
+            df.to_sql(
+                name=self.config.table_name,
+                con=self.engine,
+                if_exists='append',
+                index=False,
+                method='multi',
+                chunksize=self.config.batch_size,
+            )
             
             duration = time.time() - start_time
             self.logger.log_database_write(
@@ -219,6 +198,132 @@ class FinancialPositionWriter:
             )
             raise
     
+    def write_dataframe(
+        self,
+        df: pd.DataFrame,
+        snapshot_id: str,
+    ) -> int:
+        """
+        Write a pandas DataFrame directly to the database.
+        
+        Args:
+            df: DataFrame with financial position records
+            snapshot_id: Unique identifier for this snapshot
+            
+        Returns:
+            Number of records written
+        """
+        if not self._is_connected or not self.engine:
+            raise RuntimeError("Writer is not connected. Call connect() first.")
+        
+        if df.empty:
+            self.logger.debug("No records to write")
+            return 0
+        
+        start_time = time.time()
+        
+        try:
+            # Add metadata columns
+            df = df.copy()
+            df['snapshot_id'] = snapshot_id
+            df['created_at'] = datetime.utcnow()
+            
+            # Rename columns to match database schema
+            column_mapping = {
+                'partition': 'kafka_partition',
+                'offset': 'kafka_offset',
+                'timestamp': 'kafka_timestamp',
+            }
+            df = df.rename(columns=column_mapping)
+            
+            # Convert timestamp columns
+            if 'kafka_timestamp' in df.columns:
+                df['kafka_timestamp'] = pd.to_datetime(
+                    df['kafka_timestamp'],
+                    unit='ms',
+                    errors='coerce'
+                )
+            if 'consumed_at' in df.columns:
+                df['consumed_at'] = pd.to_datetime(
+                    df['consumed_at'],
+                    errors='coerce'
+                )
+            
+            # Select only columns that exist in the table
+            table_columns = [
+                'snapshot_id', 'position_id', 'account_id', 'symbol',
+                'quantity', 'market_value', 'cost_basis', 'unrealized_pnl',
+                'kafka_partition', 'kafka_offset', 'kafka_timestamp',
+                'consumed_at', 'created_at'
+            ]
+            df = df[[col for col in table_columns if col in df.columns]]
+            
+            # Write to database
+            total_written = len(df)
+            df.to_sql(
+                name=self.config.table_name,
+                con=self.engine,
+                if_exists='append',
+                index=False,
+                method='multi',
+                chunksize=self.config.batch_size,
+            )
+            
+            duration = time.time() - start_time
+            self.logger.log_database_write(
+                table=self.config.table_name,
+                record_count=total_written,
+                duration_seconds=duration,
+            )
+            
+            return total_written
+            
+        except Exception as e:
+            self.logger.error(
+                "Failed to write DataFrame to database",
+                record_count=len(df),
+                error=str(e),
+            )
+            raise
+    
+    def _records_to_dataframe(
+        self,
+        records: List[Dict[str, Any]],
+        snapshot_id: str,
+    ) -> pd.DataFrame:
+        """
+        Convert records list to pandas DataFrame.
+        
+        Args:
+            records: List of records
+            snapshot_id: Snapshot identifier
+            
+        Returns:
+            DataFrame with records
+        """
+        data = []
+        for record in records:
+            value = record.get("value", {})
+            
+            row = {
+                "snapshot_id": snapshot_id,
+                "position_id": value.get("position_id", ""),
+                "account_id": value.get("account_id", ""),
+                "symbol": value.get("symbol", ""),
+                "quantity": float(value.get("quantity", 0)),
+                "market_value": float(value.get("market_value")) if value.get("market_value") is not None else None,
+                "cost_basis": float(value.get("cost_basis")) if value.get("cost_basis") is not None else None,
+                "unrealized_pnl": float(value.get("unrealized_pnl")) if value.get("unrealized_pnl") is not None else None,
+                "kafka_partition": record.get("partition"),
+                "kafka_offset": record.get("offset"),
+                "kafka_timestamp": datetime.fromtimestamp(record.get("timestamp", 0) / 1000) if record.get("timestamp") else None,
+                "consumed_at": datetime.fromisoformat(record.get("consumed_at")) if record.get("consumed_at") else None,
+                "created_at": datetime.utcnow(),
+            }
+            data.append(row)
+        
+        return pd.DataFrame(data)
+    
     def get_latest_snapshot_id(self) -> Optional[str]:
         """
         Get the most recent snapshot ID from the database.
@@ -226,19 +331,22 @@ class FinancialPositionWriter:
         Returns:
             Latest snapshot ID or None if table is empty
         """
-        if not self._is_connected or not self.engine or not self.table:
+        if not self._is_connected or not self.engine:
             raise RuntimeError("Writer is not connected")
         
         try:
-            with self.engine.connect() as connection:
-                query = self.table.select().order_by(
-                    self.table.c.created_at.desc()
-                ).limit(1)
-                result = connection.execute(query).fetchone()
-                
-                if result:
-                    return result.snapshot_id
-                return None
+            query = f"""
+                SELECT snapshot_id
+                FROM {self.config.table_name}
+                ORDER BY created_at DESC
+                LIMIT 1
+            """
+            
+            df = pd.read_sql(text(query), self.engine)
+            
+            if not df.empty:
+                return df.iloc[0]['snapshot_id']
+            return None
                 
         except SQLAlchemyError as e:
             self.logger.error("Failed to get latest snapshot ID", error=str(e))
@@ -254,19 +362,24 @@ class FinancialPositionWriter:
         Returns:
             Number of records
         """
-        if not self._is_connected or not self.engine or not self.table:
+        if not self._is_connected or not self.engine:
             raise RuntimeError("Writer is not connected")
         
         try:
-            with self.engine.connect() as connection:
-                from sqlalchemy import func, select
-                
-                query = select(func.count()).select_from(self.table)
-                if snapshot_id:
-                    query = query.where(self.table.c.snapshot_id == snapshot_id)
-                
-                result = connection.execute(query).scalar()
-                return result or 0
+            if snapshot_id:
+                query = f"""
+                    SELECT COUNT(*) as count
+                    FROM {self.config.table_name}
+                    WHERE snapshot_id = '{snapshot_id}'
+                """
+            else:
+                query = f"""
+                    SELECT COUNT(*) as count
+                    FROM {self.config.table_name}
+                """
+            
+            df = pd.read_sql(text(query), self.engine)
+            return int(df.iloc[0]['count'])
                 
         except SQLAlchemyError as e:
             self.logger.error("Failed to count records", error=str(e))

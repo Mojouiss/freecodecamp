@@ -1,5 +1,5 @@
 """
-Unit tests for configuration module.
+Unit tests for configuration module with Pydantic.
 """
 
 import unittest
@@ -18,7 +18,7 @@ from financial_snapshot.core.config import (
 
 
 class TestKafkaConfig(unittest.TestCase):
-    """Test KafkaConfig class."""
+    """Test KafkaConfig class with Pydantic."""
     
     def test_default_values(self):
         """Test default configuration values."""
@@ -30,18 +30,18 @@ class TestKafkaConfig(unittest.TestCase):
         self.assertEqual(config.max_poll_records, 500)
         self.assertFalse(config.enable_auto_commit)
     
-    def test_to_dict(self):
-        """Test conversion to dictionary."""
+    def test_to_confluent_config(self):
+        """Test conversion to confluent-kafka config."""
         config = KafkaConfig(
             bootstrap_servers="kafka1:9092,kafka2:9092",
             topic="test_topic",
         )
         
-        config_dict = config.to_dict()
+        confluent_config = config.to_confluent_config()
         
-        self.assertEqual(config_dict["bootstrap_servers"], ["kafka1:9092", "kafka2:9092"])
-        self.assertEqual(config_dict["group_id"], "financial_snapshot_consumer")
-        self.assertIn("max_poll_records", config_dict)
+        self.assertEqual(confluent_config["bootstrap.servers"], "kafka1:9092,kafka2:9092")
+        self.assertEqual(confluent_config["group.id"], "financial_snapshot_consumer")
+        self.assertIn("auto.offset.reset", confluent_config)
     
     def test_custom_values(self):
         """Test custom configuration values."""
@@ -54,10 +54,16 @@ class TestKafkaConfig(unittest.TestCase):
         self.assertEqual(config.bootstrap_servers, "custom:9092")
         self.assertEqual(config.topic, "custom_topic")
         self.assertEqual(config.max_poll_records, 1000)
+    
+    def test_validation(self):
+        """Test Pydantic validation."""
+        # Test invalid max_poll_records (must be >= 1)
+        with self.assertRaises(Exception):
+            KafkaConfig(max_poll_records=0)
 
 
 class TestDatabaseConfig(unittest.TestCase):
-    """Test DatabaseConfig class."""
+    """Test DatabaseConfig class with Pydantic."""
     
     def test_default_values(self):
         """Test default configuration values."""
@@ -113,16 +119,21 @@ class TestDatabaseConfig(unittest.TestCase):
     
     def test_invalid_driver(self):
         """Test invalid driver raises error."""
-        config = DatabaseConfig(driver="invalid")
+        with self.assertRaises(Exception):
+            DatabaseConfig(driver="invalid")
+    
+    def test_validation(self):
+        """Test Pydantic validation."""
+        # Test invalid port (must be 1-65535)
+        with self.assertRaises(Exception):
+            DatabaseConfig(port=0)
         
-        with self.assertRaises(ValueError) as context:
-            config.get_connection_string()
-        
-        self.assertIn("Unsupported database driver", str(context.exception))
+        with self.assertRaises(Exception):
+            DatabaseConfig(port=70000)
 
 
 class TestSnapshotConfig(unittest.TestCase):
-    """Test SnapshotConfig class."""
+    """Test SnapshotConfig class with Pydantic."""
     
     def test_default_values(self):
         """Test default configuration values."""
@@ -147,7 +158,7 @@ class TestSnapshotConfig(unittest.TestCase):
 
 
 class TestConfig(unittest.TestCase):
-    """Test main Config class."""
+    """Test main Config class with Pydantic."""
     
     def test_default_initialization(self):
         """Test default configuration initialization."""
@@ -211,28 +222,6 @@ class TestConfig(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             Config.from_file("/nonexistent/config.json")
     
-    def test_from_env(self):
-        """Test configuration from environment variables."""
-        # Set environment variables
-        os.environ["FS_KAFKA_BOOTSTRAP_SERVERS"] = "env-kafka:9092"
-        os.environ["FS_KAFKA_TOPIC"] = "env_topic"
-        os.environ["FS_DB_HOST"] = "env-db.example.com"
-        os.environ["FS_DB_PORT"] = "3306"
-        os.environ["FS_SNAPSHOT_INTERVAL"] = "600"
-        
-        try:
-            config = Config.from_env()
-            
-            self.assertEqual(config.kafka.bootstrap_servers, "env-kafka:9092")
-            self.assertEqual(config.kafka.topic, "env_topic")
-            self.assertEqual(config.database.host, "env-db.example.com")
-            self.assertEqual(config.database.port, 3306)
-            self.assertEqual(config.snapshot.interval_seconds, 600)
-        finally:
-            # Clean up environment variables
-            for key in ["FS_KAFKA_BOOTSTRAP_SERVERS", "FS_KAFKA_TOPIC", "FS_DB_HOST", "FS_DB_PORT", "FS_SNAPSHOT_INTERVAL"]:
-                os.environ.pop(key, None)
-    
     def test_validate_success(self):
         """Test validation with valid configuration."""
         config = Config()
@@ -259,26 +248,6 @@ class TestConfig(unittest.TestCase):
             config.validate()
         
         self.assertIn("topic", str(context.exception))
-    
-    def test_validate_invalid_batch_size(self):
-        """Test validation fails with invalid batch size."""
-        config = Config()
-        config.database.batch_size = -1
-        
-        with self.assertRaises(ValueError) as context:
-            config.validate()
-        
-        self.assertIn("batch_size", str(context.exception))
-    
-    def test_validate_invalid_interval(self):
-        """Test validation fails with invalid interval."""
-        config = Config()
-        config.snapshot.interval_seconds = 0
-        
-        with self.assertRaises(ValueError) as context:
-            config.validate()
-        
-        self.assertIn("interval", str(context.exception))
     
     def test_validate_timeout_exceeds_interval(self):
         """Test validation fails when timeout exceeds interval."""

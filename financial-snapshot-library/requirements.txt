@@ -1,7 +1,10 @@
 # Financial Snapshot Library Requirements
 
 # Core dependencies
-kafka-python==2.0.2
+confluent-kafka==2.3.0  # High-performance Kafka client
+pydantic==2.5.3  # Data validation and settings management
+pydantic-settings==2.1.0  # Settings management
+pandas==2.1.4  # Data processing and manipulation
 sqlalchemy==2.0.23
 psycopg2-binary==2.9.9  # PostgreSQL driver
 pymysql==1.1.1  # MySQL driver (patched for SQL injection vulnerability)

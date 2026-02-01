@@ -2,64 +2,75 @@
 Configuration management for the financial snapshot library.
 
 This module provides a robust configuration system with validation,
-environment variable support, and sensible defaults.
+environment variable support, and sensible defaults using Pydantic.
 """
 
-from dataclasses import dataclass, field
-from typing import Dict, Any, Optional
-import os
+from typing import Dict, Any, Optional, List
 from pathlib import Path
 import json
 
+from pydantic import BaseModel, Field, field_validator, ConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-@dataclass
-class KafkaConfig:
-    """Kafka consumer configuration."""
+
+class KafkaConfig(BaseModel):
+    """Kafka consumer configuration for confluent-kafka."""
     
-    bootstrap_servers: str = field(default="localhost:9092")
-    topic: str = field(default="financial_positions")
-    group_id: str = field(default="financial_snapshot_consumer")
-    auto_offset_reset: str = field(default="earliest")
-    enable_auto_commit: bool = field(default=False)
-    max_poll_records: int = field(default=500)
-    session_timeout_ms: int = field(default=30000)
-    max_poll_interval_ms: int = field(default=300000)
-    fetch_max_bytes: int = field(default=52428800)  # 50MB
+    model_config = ConfigDict(validate_assignment=True)
     
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for kafka-python consumer config."""
+    bootstrap_servers: str = Field(default="localhost:9092", description="Comma-separated Kafka brokers")
+    topic: str = Field(default="financial_positions", description="Kafka topic name")
+    group_id: str = Field(default="financial_snapshot_consumer", description="Consumer group ID")
+    auto_offset_reset: str = Field(default="earliest", description="Offset reset strategy")
+    enable_auto_commit: bool = Field(default=False, description="Enable auto commit")
+    max_poll_records: int = Field(default=500, ge=1, description="Max records per poll")
+    session_timeout_ms: int = Field(default=30000, ge=1000, description="Session timeout")
+    max_poll_interval_ms: int = Field(default=300000, ge=1000, description="Max poll interval")
+    fetch_max_bytes: int = Field(default=52428800, ge=1024, description="Max fetch bytes")
+    
+    def to_confluent_config(self) -> Dict[str, Any]:
+        """Convert to confluent-kafka consumer config."""
         return {
-            "bootstrap_servers": self.bootstrap_servers.split(","),
-            "group_id": self.group_id,
-            "auto_offset_reset": self.auto_offset_reset,
-            "enable_auto_commit": self.enable_auto_commit,
-            "max_poll_records": self.max_poll_records,
-            "session_timeout_ms": self.session_timeout_ms,
-            "max_poll_interval_ms": self.max_poll_interval_ms,
-            "fetch_max_bytes": self.fetch_max_bytes,
+            "bootstrap.servers": self.bootstrap_servers,
+            "group.id": self.group_id,
+            "auto.offset.reset": self.auto_offset_reset,
+            "enable.auto.commit": self.enable_auto_commit,
+            "session.timeout.ms": self.session_timeout_ms,
+            "max.poll.interval.ms": self.max_poll_interval_ms,
+            "fetch.max.bytes": self.fetch_max_bytes,
         }
 
 
-@dataclass
-class DatabaseConfig:
+class DatabaseConfig(BaseModel):
     """SQL database configuration."""
     
-    driver: str = field(default="postgresql")
-    host: str = field(default="localhost")
-    port: int = field(default=5432)
-    database: str = field(default="financial_db")
-    username: str = field(default="postgres")
-    password: str = field(default="")
-    table_name: str = field(default="financial_positions")
+    model_config = ConfigDict(validate_assignment=True)
+    
+    driver: str = Field(default="postgresql", description="Database driver")
+    host: str = Field(default="localhost", description="Database host")
+    port: int = Field(default=5432, ge=1, le=65535, description="Database port")
+    database: str = Field(default="financial_db", min_length=1, description="Database name")
+    username: str = Field(default="postgres", description="Database username")
+    password: str = Field(default="", description="Database password")
+    table_name: str = Field(default="financial_positions", min_length=1, description="Table name")
     
     # Connection pool settings
-    pool_size: int = field(default=5)
-    max_overflow: int = field(default=10)
-    pool_timeout: int = field(default=30)
-    pool_recycle: int = field(default=3600)
+    pool_size: int = Field(default=5, ge=1, description="Connection pool size")
+    max_overflow: int = Field(default=10, ge=0, description="Max overflow connections")
+    pool_timeout: int = Field(default=30, ge=1, description="Pool timeout in seconds")
+    pool_recycle: int = Field(default=3600, ge=60, description="Pool recycle time in seconds")
     
     # Batch insert settings
-    batch_size: int = field(default=1000)
+    batch_size: int = Field(default=1000, ge=1, description="Batch insert size")
+    
+    @field_validator("driver")
+    @classmethod
+    def validate_driver(cls, v: str) -> str:
+        """Validate database driver."""
+        allowed = ["postgresql", "mysql", "mssql"]
+        if v not in allowed:
+            raise ValueError(f"Driver must be one of {allowed}")
+        return v
     
     def get_connection_string(self) -> str:
         """Generate SQLAlchemy connection string."""
@@ -73,38 +84,70 @@ class DatabaseConfig:
             raise ValueError(f"Unsupported database driver: {self.driver}")
 
 
-@dataclass
-class SnapshotConfig:
+class SnapshotConfig(BaseModel):
     """Snapshot processing configuration."""
     
-    interval_seconds: int = field(default=300)  # 5 minutes
-    processing_timeout_seconds: int = field(default=240)  # 4 minutes
-    max_retries: int = field(default=3)
-    retry_backoff_seconds: int = field(default=5)
+    model_config = ConfigDict(validate_assignment=True)
+    
+    interval_seconds: int = Field(default=300, ge=1, description="Snapshot interval in seconds")
+    processing_timeout_seconds: int = Field(default=240, ge=1, description="Processing timeout")
+    max_retries: int = Field(default=3, ge=0, description="Max retry attempts")
+    retry_backoff_seconds: int = Field(default=5, ge=1, description="Retry backoff in seconds")
     
     # Snapshot settings
-    enable_deduplication: bool = field(default=True)
-    deduplication_keys: list = field(default_factory=lambda: ["position_id", "account_id"])
+    enable_deduplication: bool = Field(default=True, description="Enable deduplication")
+    deduplication_keys: List[str] = Field(
+        default_factory=lambda: ["position_id", "account_id"],
+        description="Deduplication key fields"
+    )
+    
+    @field_validator("processing_timeout_seconds")
+    @classmethod
+    def validate_timeout(cls, v: int, info) -> int:
+        """Validate timeout is less than interval."""
+        # Note: In Pydantic v2, we can't access other fields during validation
+        # This validation will be done in the Config.model_post_init
+        return v
 
 
-@dataclass
-class LoggingConfig:
+class LoggingConfig(BaseModel):
     """Logging configuration."""
     
-    level: str = field(default="INFO")
-    format: str = field(default="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    log_file: Optional[str] = field(default=None)
-    enable_console: bool = field(default=True)
+    model_config = ConfigDict(validate_assignment=True)
+    
+    level: str = Field(default="INFO", description="Log level")
+    format: str = Field(
+        default="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        description="Log format"
+    )
+    log_file: Optional[str] = Field(default=None, description="Log file path")
+    enable_console: bool = Field(default=True, description="Enable console logging")
+    
+    @field_validator("level")
+    @classmethod
+    def validate_level(cls, v: str) -> str:
+        """Validate log level."""
+        allowed = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+        v_upper = v.upper()
+        if v_upper not in allowed:
+            raise ValueError(f"Log level must be one of {allowed}")
+        return v_upper
 
 
-@dataclass
-class Config:
+class Config(BaseSettings):
     """Main configuration class for the financial snapshot library."""
     
-    kafka: KafkaConfig = field(default_factory=KafkaConfig)
-    database: DatabaseConfig = field(default_factory=DatabaseConfig)
-    snapshot: SnapshotConfig = field(default_factory=SnapshotConfig)
-    logging: LoggingConfig = field(default_factory=LoggingConfig)
+    model_config = SettingsConfigDict(
+        env_prefix="FS_",
+        env_nested_delimiter="__",
+        case_sensitive=False,
+        validate_assignment=True,
+    )
+    
+    kafka: KafkaConfig = Field(default_factory=KafkaConfig)
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    snapshot: SnapshotConfig = Field(default_factory=SnapshotConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
     
     @classmethod
     def from_file(cls, config_path: str) -> "Config":
@@ -124,7 +167,7 @@ class Config:
         with open(path, "r") as f:
             config_dict = json.load(f)
         
-        return cls.from_dict(config_dict)
+        return cls(**config_dict)
     
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> "Config":
@@ -137,17 +180,7 @@ class Config:
         Returns:
             Config instance
         """
-        kafka_config = KafkaConfig(**config_dict.get("kafka", {}))
-        database_config = DatabaseConfig(**config_dict.get("database", {}))
-        snapshot_config = SnapshotConfig(**config_dict.get("snapshot", {}))
-        logging_config = LoggingConfig(**config_dict.get("logging", {}))
-        
-        return cls(
-            kafka=kafka_config,
-            database=database_config,
-            snapshot=snapshot_config,
-            logging=logging_config,
-        )
+        return cls(**config_dict)
     
     @classmethod
     def from_env(cls) -> "Config":
@@ -155,43 +188,19 @@ class Config:
         Load configuration from environment variables.
         
         Environment variables should be prefixed with FS_ (Financial Snapshot).
-        Example: FS_KAFKA_BOOTSTRAP_SERVERS, FS_DB_HOST, etc.
+        Examples:
+            FS_KAFKA__BOOTSTRAP_SERVERS=kafka:9092
+            FS_DATABASE__HOST=db.example.com
+            FS_SNAPSHOT__INTERVAL_SECONDS=600
         
         Returns:
             Config instance with environment settings
         """
-        kafka_config = KafkaConfig(
-            bootstrap_servers=os.getenv("FS_KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),
-            topic=os.getenv("FS_KAFKA_TOPIC", "financial_positions"),
-            group_id=os.getenv("FS_KAFKA_GROUP_ID", "financial_snapshot_consumer"),
-        )
-        
-        database_config = DatabaseConfig(
-            driver=os.getenv("FS_DB_DRIVER", "postgresql"),
-            host=os.getenv("FS_DB_HOST", "localhost"),
-            port=int(os.getenv("FS_DB_PORT", "5432")),
-            database=os.getenv("FS_DB_NAME", "financial_db"),
-            username=os.getenv("FS_DB_USERNAME", "postgres"),
-            password=os.getenv("FS_DB_PASSWORD", ""),
-            table_name=os.getenv("FS_DB_TABLE", "financial_positions"),
-            batch_size=int(os.getenv("FS_DB_BATCH_SIZE", "1000")),
-        )
-        
-        snapshot_config = SnapshotConfig(
-            interval_seconds=int(os.getenv("FS_SNAPSHOT_INTERVAL", "300")),
-        )
-        
-        logging_config = LoggingConfig(
-            level=os.getenv("FS_LOG_LEVEL", "INFO"),
-            log_file=os.getenv("FS_LOG_FILE", None),
-        )
-        
-        return cls(
-            kafka=kafka_config,
-            database=database_config,
-            snapshot=snapshot_config,
-            logging=logging_config,
-        )
+        return cls()
+    
+    def model_post_init(self, __context: Any) -> None:
+        """Validate configuration after initialization."""
+        self.validate()
     
     def validate(self) -> None:
         """
@@ -211,14 +220,6 @@ class Config:
             raise ValueError("Database host cannot be empty")
         if not self.database.database:
             raise ValueError("Database name cannot be empty")
-        if self.database.batch_size <= 0:
-            raise ValueError("Database batch_size must be positive")
-        
-        # Validate Snapshot config
-        if self.snapshot.interval_seconds <= 0:
-            raise ValueError("Snapshot interval must be positive")
-        if self.snapshot.processing_timeout_seconds <= 0:
-            raise ValueError("Processing timeout must be positive")
         
         # Validate that timeout is less than interval
         if self.snapshot.processing_timeout_seconds >= self.snapshot.interval_seconds:

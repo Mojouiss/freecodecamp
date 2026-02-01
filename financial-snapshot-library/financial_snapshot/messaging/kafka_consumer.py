@@ -1,15 +1,15 @@
 """
-Kafka consumer for financial position messages.
+Kafka consumer for financial position messages using confluent-kafka.
 
 Provides robust, efficient Kafka consumption with error handling and batching.
 """
 
 from typing import List, Dict, Any, Optional, Callable
-from kafka import KafkaConsumer
-from kafka.errors import KafkaError
+from confluent_kafka import Consumer, KafkaError, KafkaException, TopicPartition
 import json
 from datetime import datetime
 import time
+import pandas as pd
 
 from ..core.config import KafkaConfig
 from ..utils.logger import SnapshotLogger
@@ -17,7 +17,7 @@ from ..utils.logger import SnapshotLogger
 
 class FinancialPositionConsumer:
     """
-    Kafka consumer for financial position records.
+    Kafka consumer for financial position records using confluent-kafka.
     
     Handles message consumption, deserialization, and batch processing
     with robust error handling and performance optimization.
@@ -44,7 +44,7 @@ class FinancialPositionConsumer:
         if value_deserializer is None:
             value_deserializer = lambda m: json.loads(m.decode("utf-8"))
         
-        self.consumer: Optional[KafkaConsumer] = None
+        self.consumer: Optional[Consumer] = None
         self.value_deserializer = value_deserializer
         self._is_connected = False
     
@@ -53,7 +53,7 @@ class FinancialPositionConsumer:
         Establish connection to Kafka.
         
         Raises:
-            KafkaError: If connection fails
+            KafkaException: If connection fails
         """
         try:
             self.logger.info(
@@ -62,18 +62,19 @@ class FinancialPositionConsumer:
                 topic=self.config.topic,
             )
             
-            consumer_config = self.config.to_dict()
-            consumer_config["value_deserializer"] = self.value_deserializer
+            # Get confluent-kafka config
+            consumer_config = self.config.to_confluent_config()
             
-            self.consumer = KafkaConsumer(
-                self.config.topic,
-                **consumer_config,
-            )
+            # Create consumer
+            self.consumer = Consumer(consumer_config)
+            
+            # Subscribe to topic
+            self.consumer.subscribe([self.config.topic])
             
             self._is_connected = True
             self.logger.info("Successfully connected to Kafka")
             
-        except KafkaError as e:
+        except KafkaException as e:
             self.logger.error("Failed to connect to Kafka", error=str(e))
             raise
     
@@ -108,43 +109,72 @@ class FinancialPositionConsumer:
         
         records = []
         start_time = time.time()
+        max_msgs = max_records or self.config.max_poll_records
+        timeout_sec = timeout_ms / 1000.0
         
         try:
             # Poll for messages
-            messages = self.consumer.poll(
-                timeout_ms=timeout_ms,
-                max_records=max_records or self.config.max_poll_records,
-            )
-            
-            # Extract and transform messages
-            for topic_partition, msgs in messages.items():
-                for msg in msgs:
-                    try:
-                        record = {
-                            "value": msg.value,
-                            "key": msg.key.decode("utf-8") if msg.key else None,
-                            "partition": msg.partition,
-                            "offset": msg.offset,
-                            "timestamp": msg.timestamp,
-                            "consumed_at": datetime.utcnow().isoformat(),
-                        }
-                        records.append(record)
-                        
-                    except Exception as e:
-                        self.logger.error(
-                            "Failed to process message",
-                            partition=msg.partition,
-                            offset=msg.offset,
-                            error=str(e),
-                        )
+            while len(records) < max_msgs:
+                elapsed = time.time() - start_time
+                if elapsed >= timeout_sec:
+                    break
                 
-                if records:
-                    last_msg = msgs[-1]
+                remaining_timeout = timeout_sec - elapsed
+                msg = self.consumer.poll(timeout=remaining_timeout)
+                
+                if msg is None:
+                    continue
+                
+                if msg.error():
+                    if msg.error().code() == KafkaError._PARTITION_EOF:
+                        # End of partition - normal behavior
+                        continue
+                    else:
+                        self.logger.error(
+                            "Kafka error during consumption",
+                            error=str(msg.error())
+                        )
+                        raise KafkaException(msg.error())
+                
+                try:
+                    # Deserialize and create record
+                    value = self.value_deserializer(msg.value())
+                    
+                    record = {
+                        "value": value,
+                        "key": msg.key().decode("utf-8") if msg.key() else None,
+                        "partition": msg.partition(),
+                        "offset": msg.offset(),
+                        "timestamp": msg.timestamp()[1] if msg.timestamp()[0] > 0 else None,
+                        "consumed_at": datetime.utcnow().isoformat(),
+                    }
+                    records.append(record)
+                    
+                except Exception as e:
+                    self.logger.error(
+                        "Failed to process message",
+                        partition=msg.partition(),
+                        offset=msg.offset(),
+                        error=str(e),
+                    )
+            
+            # Log consumption metrics
+            if records:
+                # Group by partition for logging
+                partitions = {}
+                for record in records:
+                    p = record["partition"]
+                    if p not in partitions:
+                        partitions[p] = []
+                    partitions[p].append(record)
+                
+                for partition, partition_records in partitions.items():
+                    last_offset = partition_records[-1]["offset"]
                     self.logger.log_kafka_consumption(
-                        topic=topic_partition.topic,
-                        partition=topic_partition.partition,
-                        offset=last_msg.offset,
-                        record_count=len(msgs),
+                        topic=self.config.topic,
+                        partition=partition,
+                        offset=last_offset,
+                        record_count=len(partition_records),
                     )
             
             duration = time.time() - start_time
@@ -157,23 +187,81 @@ class FinancialPositionConsumer:
             
             return records
             
-        except KafkaError as e:
+        except KafkaException as e:
             self.logger.error("Kafka error during consumption", error=str(e))
             raise
     
-    def commit(self) -> None:
+    def consume_batch_as_dataframe(
+        self,
+        timeout_ms: int = 10000,
+        max_records: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """
+        Consume a batch of records and return as pandas DataFrame.
+        
+        Args:
+            timeout_ms: Timeout for polling in milliseconds
+            max_records: Maximum number of records to consume
+            
+        Returns:
+            DataFrame with consumed records
+        """
+        records = self.consume_batch(timeout_ms=timeout_ms, max_records=max_records)
+        
+        if not records:
+            # Return empty DataFrame with expected schema
+            return pd.DataFrame(columns=[
+                "key", "partition", "offset", "timestamp", "consumed_at",
+                "position_id", "account_id", "symbol", "quantity",
+                "market_value", "cost_basis", "unrealized_pnl"
+            ])
+        
+        # Flatten records for DataFrame
+        data = []
+        for record in records:
+            value = record.get("value", {})
+            row = {
+                "key": record.get("key"),
+                "partition": record.get("partition"),
+                "offset": record.get("offset"),
+                "timestamp": record.get("timestamp"),
+                "consumed_at": record.get("consumed_at"),
+                "position_id": value.get("position_id"),
+                "account_id": value.get("account_id"),
+                "symbol": value.get("symbol"),
+                "quantity": value.get("quantity"),
+                "market_value": value.get("market_value"),
+                "cost_basis": value.get("cost_basis"),
+                "unrealized_pnl": value.get("unrealized_pnl"),
+            }
+            data.append(row)
+        
+        df = pd.DataFrame(data)
+        
+        # Convert data types
+        numeric_cols = ["quantity", "market_value", "cost_basis", "unrealized_pnl"]
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        
+        return df
+    
+    def commit(self, asynchronous: bool = True) -> None:
         """
         Manually commit offsets.
         
         Should be called after successfully processing and storing records.
+        
+        Args:
+            asynchronous: Whether to commit asynchronously
         """
         if not self._is_connected or not self.consumer:
             raise RuntimeError("Consumer is not connected")
         
         try:
-            self.consumer.commit()
+            self.consumer.commit(asynchronous=asynchronous)
             self.logger.debug("Committed offsets to Kafka")
-        except KafkaError as e:
+        except KafkaException as e:
             self.logger.error("Failed to commit offsets", error=str(e))
             raise
     
@@ -182,16 +270,31 @@ class FinancialPositionConsumer:
         if not self._is_connected or not self.consumer:
             raise RuntimeError("Consumer is not connected")
         
-        self.consumer.seek_to_beginning()
-        self.logger.info("Seeked to beginning of partitions")
+        partitions = self.consumer.assignment()
+        if partitions:
+            for partition in partitions:
+                self.consumer.seek(TopicPartition(
+                    partition.topic,
+                    partition.partition,
+                    0
+                ))
+            self.logger.info("Seeked to beginning of partitions")
     
     def seek_to_end(self) -> None:
         """Seek to the end of all assigned partitions."""
         if not self._is_connected or not self.consumer:
             raise RuntimeError("Consumer is not connected")
         
-        self.consumer.seek_to_end()
-        self.logger.info("Seeked to end of partitions")
+        partitions = self.consumer.assignment()
+        if partitions:
+            for partition in partitions:
+                low, high = self.consumer.get_watermark_offsets(partition)
+                self.consumer.seek(TopicPartition(
+                    partition.topic,
+                    partition.partition,
+                    high
+                ))
+            self.logger.info("Seeked to end of partitions")
     
     def get_current_offsets(self) -> Dict[int, int]:
         """
@@ -204,9 +307,13 @@ class FinancialPositionConsumer:
             raise RuntimeError("Consumer is not connected")
         
         offsets = {}
-        for partition in self.consumer.assignment():
-            position = self.consumer.position(partition)
-            offsets[partition.partition] = position
+        partitions = self.consumer.assignment()
+        
+        if partitions:
+            for partition in partitions:
+                position = self.consumer.position([partition])
+                if position:
+                    offsets[partition.partition] = position[0].offset
         
         return offsets
     
