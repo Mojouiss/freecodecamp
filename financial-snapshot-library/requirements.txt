@@ -4,7 +4,7 @@
 kafka-python==2.0.2
 sqlalchemy==2.0.23
 psycopg2-binary==2.9.9  # PostgreSQL driver
-pymysql==1.1.0  # MySQL driver
+pymysql==1.1.1  # MySQL driver (patched for SQL injection vulnerability)
 pyodbc==5.0.1  # SQL Server driver
 
 # Testing
