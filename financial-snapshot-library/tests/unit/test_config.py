@@ -217,6 +217,34 @@ class TestConfig(unittest.TestCase):
         finally:
             os.unlink(temp_file)
     
+    def test_from_yaml_file(self):
+        """Test configuration from YAML file."""
+        import yaml
+        
+        config_dict = {
+            "kafka": {
+                "bootstrap_servers": "kafka:9092",
+                "topic": "yaml_topic",
+            },
+            "database": {
+                "host": "yamldb.example.com",
+            },
+        }
+        
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(config_dict, f)
+            temp_file = f.name
+        
+        try:
+            config = Config.from_file(temp_file)
+            
+            self.assertEqual(config.kafka.bootstrap_servers, "kafka:9092")
+            self.assertEqual(config.kafka.topic, "yaml_topic")
+            self.assertEqual(config.database.host, "yamldb.example.com")
+        finally:
+            if os.path.exists(temp_file):
+                os.unlink(temp_file)
+    
     def test_from_file_not_found(self):
         """Test error when config file doesn't exist."""
         with self.assertRaises(FileNotFoundError):

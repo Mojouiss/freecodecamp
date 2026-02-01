@@ -1,8 +1,9 @@
 """
-SQL database writer for financial positions using pandas.
+SQL database writer for financial positions using pandas and pyodbc.
 
 Provides efficient, reliable storage with connection pooling, batch inserts,
 and transaction management using pandas for data processing.
+Uses pyodbc for SQL Server connectivity.
 """
 
 from typing import List, Dict, Any, Optional
@@ -24,6 +25,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
 import time
 import pandas as pd
+
+try:
+    import pyodbc
+    PYODBC_AVAILABLE = True
+except ImportError:
+    PYODBC_AVAILABLE = False
 
 from ..core.config import DatabaseConfig
 from ..utils.logger import SnapshotLogger
@@ -60,6 +67,7 @@ class FinancialPositionWriter:
     def connect(self) -> None:
         """
         Establish database connection with connection pooling.
+        Uses pyodbc for SQL Server (mssql driver).
         
         Raises:
             SQLAlchemyError: If connection fails
@@ -72,7 +80,15 @@ class FinancialPositionWriter:
                 database=self.config.database,
             )
             
+            # For SQL Server, verify pyodbc is available
+            if self.config.driver == "mssql" and not PYODBC_AVAILABLE:
+                raise RuntimeError(
+                    "pyodbc is required for SQL Server connections but is not installed. "
+                    "Install it with: pip install pyodbc"
+                )
+            
             # Create engine with connection pooling
+            # For SQL Server (mssql), SQLAlchemy uses pyodbc under the hood
             self.engine = create_engine(
                 self.config.get_connection_string(),
                 poolclass=QueuePool,
@@ -82,6 +98,13 @@ class FinancialPositionWriter:
                 pool_recycle=self.config.pool_recycle,
                 pool_pre_ping=True,  # Verify connections before using
             )
+            
+            # Log pyodbc version for SQL Server connections
+            if self.config.driver == "mssql" and PYODBC_AVAILABLE:
+                self.logger.info(
+                    "Using pyodbc for SQL Server",
+                    pyodbc_version=pyodbc.version,
+                )
             
             # Define table schema
             self._define_table()

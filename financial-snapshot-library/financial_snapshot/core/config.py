@@ -3,11 +3,13 @@ Configuration management for the financial snapshot library.
 
 This module provides a robust configuration system with validation,
 environment variable support, and sensible defaults using Pydantic.
+Supports JSON and YAML configuration files.
 """
 
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 import json
+import yaml
 
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -152,10 +154,10 @@ class Config(BaseSettings):
     @classmethod
     def from_file(cls, config_path: str) -> "Config":
         """
-        Load configuration from a JSON file.
+        Load configuration from a JSON or YAML file.
         
         Args:
-            config_path: Path to the configuration file
+            config_path: Path to the configuration file (.json, .yaml, or .yml)
             
         Returns:
             Config instance with loaded settings
@@ -165,7 +167,19 @@ class Config(BaseSettings):
             raise FileNotFoundError(f"Configuration file not found: {config_path}")
         
         with open(path, "r") as f:
-            config_dict = json.load(f)
+            # Detect file type by extension
+            if path.suffix.lower() in ['.yaml', '.yml']:
+                config_dict = yaml.safe_load(f)
+            elif path.suffix.lower() == '.json':
+                config_dict = json.load(f)
+            else:
+                # Try YAML first, fall back to JSON
+                content = f.read()
+                f.seek(0)
+                try:
+                    config_dict = yaml.safe_load(content)
+                except yaml.YAMLError:
+                    config_dict = json.loads(content)
         
         return cls(**config_dict)
     
