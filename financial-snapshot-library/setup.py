@@ -42,7 +42,6 @@ setup(
         "pyyaml>=6.0.0",
         "sqlalchemy>=2.0.0",
         "psycopg2-binary>=2.9.0",
-        "pymysql>=1.1.1",
         "pyodbc>=5.0.0",
     ],
     extras_require={

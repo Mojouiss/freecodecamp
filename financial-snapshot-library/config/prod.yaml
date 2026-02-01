@@ -1,0 +1,40 @@
+# Production Environment Configuration
+
+kafka:
+  bootstrap_servers: kafka-prod-1.example.com:9092,kafka-prod-2.example.com:9092,kafka-prod-3.example.com:9092
+  topic: financial_positions
+  group_id: financial_snapshot_consumer_prod
+  auto_offset_reset: earliest
+  max_poll_records: 500
+  session_timeout_ms: 30000
+  max_poll_interval_ms: 300000
+
+database:
+  driver: mssql  # SQL Server for production
+  host: sqlserver-prod.example.com
+  port: 1433
+  database: financial_db_prod
+  username: ${DB_USERNAME}  # Use environment variables for sensitive data
+  password: ${DB_PASSWORD}
+  table_name: financial_positions
+  pool_size: 10
+  max_overflow: 20
+  pool_timeout: 30
+  pool_recycle: 3600
+  batch_size: 1000
+
+snapshot:
+  interval_seconds: 300  # 5 minutes
+  processing_timeout_seconds: 240
+  max_retries: 5
+  retry_backoff_seconds: 10
+  enable_deduplication: true
+  deduplication_keys:
+    - position_id
+    - account_id
+
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - [%(process)d] - %(message)s"
+  log_file: /var/log/financial-snapshot/snapshot.log
+  enable_console: false  # Console logging disabled in production

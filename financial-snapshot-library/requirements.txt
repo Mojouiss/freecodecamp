@@ -8,7 +8,6 @@ pandas==2.1.4  # Data processing and manipulation
 pyyaml==6.0.1  # YAML configuration support
 sqlalchemy==2.0.23
 psycopg2-binary==2.9.9  # PostgreSQL driver
-pymysql==1.1.1  # MySQL driver (patched for SQL injection vulnerability)
 pyodbc==5.0.1  # SQL Server driver
 
 # Testing

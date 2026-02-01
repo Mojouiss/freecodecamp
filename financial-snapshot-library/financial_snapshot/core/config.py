@@ -69,7 +69,7 @@ class DatabaseConfig(BaseModel):
     @classmethod
     def validate_driver(cls, v: str) -> str:
         """Validate database driver."""
-        allowed = ["postgresql", "mysql", "mssql"]
+        allowed = ["postgresql", "mssql"]
         if v not in allowed:
             raise ValueError(f"Driver must be one of {allowed}")
         return v
@@ -80,8 +80,6 @@ class DatabaseConfig(BaseModel):
             return f"postgresql://{self.username}:{self.password}@{self.host}:{self.port}/{self.database}"
         elif self.driver == "mssql":
             return f"mssql+pyodbc://{self.username}:{self.password}@{self.host}:{self.port}/{self.database}?driver=ODBC+Driver+17+for+SQL+Server"
-        elif self.driver == "mysql":
-            return f"mysql+pymysql://{self.username}:{self.password}@{self.host}:{self.port}/{self.database}"
         else:
             raise ValueError(f"Unsupported database driver: {self.driver}")
 

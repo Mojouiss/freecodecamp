@@ -1,0 +1,39 @@
+# UAT Environment Configuration
+
+kafka:
+  bootstrap_servers: kafka-uat.example.com:9092
+  topic: financial_positions_uat
+  group_id: financial_snapshot_consumer_uat
+  auto_offset_reset: earliest
+  max_poll_records: 500
+  session_timeout_ms: 30000
+  max_poll_interval_ms: 300000
+
+database:
+  driver: postgresql
+  host: db-uat.example.com
+  port: 5432
+  database: financial_db_uat
+  username: postgres
+  password: ${DB_PASSWORD}  # Use environment variable for sensitive data
+  table_name: financial_positions
+  pool_size: 5
+  max_overflow: 10
+  pool_timeout: 30
+  batch_size: 1000
+
+snapshot:
+  interval_seconds: 300  # 5 minutes
+  processing_timeout_seconds: 240
+  max_retries: 3
+  retry_backoff_seconds: 5
+  enable_deduplication: true
+  deduplication_keys:
+    - position_id
+    - account_id
+
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  log_file: logs/uat/snapshot.log
+  enable_console: true

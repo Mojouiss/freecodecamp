@@ -10,7 +10,7 @@ Built with industry-standard libraries: **Pydantic** for configuration validatio
 - **High Performance**: Batch processing with connection pooling for minimal database pressure
 - **Data Quality**: Built-in validation and deduplication using pandas
 - **Flexible Configuration**: Pydantic-based configuration with JSON files, environment variables, or programmatic setup
-- **Multiple Database Support**: PostgreSQL, MySQL, and SQL Server
+- **Multiple Database Support**: PostgreSQL and SQL Server (via pyodbc)
 - **Robust Error Handling**: Automatic retries with exponential backoff
 - **Comprehensive Logging**: Structured logging with performance metrics
 - **Production Ready**: Battle-tested with comprehensive unit tests
@@ -134,39 +134,121 @@ with FinancialPositionWriter(config.database) as writer:
 
 ## Configuration
 
-### Configuration File (config.json)
+The library supports environment-specific YAML configuration files for different deployment environments.
 
-```json
-{
-  "kafka": {
-    "bootstrap_servers": "localhost:9092",
-    "topic": "financial_positions",
-    "group_id": "financial_snapshot_consumer",
-    "max_poll_records": 500
-  },
-  "database": {
-    "driver": "postgresql",
-    "host": "localhost",
-    "port": 5432,
-    "database": "financial_db",
-    "username": "postgres",
-    "password": "your_password",
-    "table_name": "financial_positions",
-    "batch_size": 1000,
-    "pool_size": 5
-  },
-  "snapshot": {
-    "interval_seconds": 300,
-    "processing_timeout_seconds": 240,
-    "max_retries": 3,
-    "enable_deduplication": true,
-    "deduplication_keys": ["position_id", "account_id"]
-  },
-  "logging": {
-    "level": "INFO",
-    "log_file": "logs/snapshot.log"
-  }
-}
+### Environment-Specific Configuration Files
+
+The library provides pre-configured YAML files for different environments:
+
+- **`config/dev.yaml`** - Development environment with verbose logging
+- **`config/uat.yaml`** - UAT environment with moderate logging
+- **`config/prod.yaml`** - Production environment with optimized settings
+- **`config/logging.yaml`** - Centralized logging configuration
+
+### Loading Configuration
+
+```python
+from financial_snapshot import Config
+
+# Load environment-specific config
+config = Config.from_file("config/dev.yaml")     # Development
+config = Config.from_file("config/uat.yaml")     # UAT
+config = Config.from_file("config/prod.yaml")    # Production
+
+# Or use environment variables
+config = Config.from_env()
+```
+
+### Example: Development Configuration (dev.yaml)
+
+```yaml
+kafka:
+  bootstrap_servers: localhost:9092
+  topic: financial_positions_dev
+  group_id: financial_snapshot_consumer_dev
+  max_poll_records: 500
+
+database:
+  driver: postgresql
+  host: localhost
+  port: 5432
+  database: financial_db_dev
+  username: postgres
+  password: dev_password
+  table_name: financial_positions
+  batch_size: 1000
+
+snapshot:
+  interval_seconds: 300  # 5 minutes
+  max_retries: 3
+  enable_deduplication: true
+  deduplication_keys:
+    - position_id
+    - account_id
+
+logging:
+  level: DEBUG
+  log_file: logs/dev/snapshot.log
+  enable_console: true
+```
+
+### Example: Production Configuration (prod.yaml)
+
+```yaml
+kafka:
+  bootstrap_servers: kafka-prod-1:9092,kafka-prod-2:9092,kafka-prod-3:9092
+  topic: financial_positions
+  group_id: financial_snapshot_consumer_prod
+
+database:
+  driver: mssql  # SQL Server with pyodbc
+  host: sqlserver-prod.example.com
+  port: 1433
+  database: financial_db_prod
+  username: ${DB_USERNAME}  # From environment variables
+  password: ${DB_PASSWORD}
+  pool_size: 10
+  max_overflow: 20
+
+snapshot:
+  interval_seconds: 300
+  max_retries: 5
+
+logging:
+  level: INFO
+  log_file: /var/log/financial-snapshot/snapshot.log
+  enable_console: false
+```
+
+### Logging Configuration (logging.yaml)
+
+Centralized logging configuration using Python's logging.config format:
+
+```yaml
+version: 1
+formatters:
+  standard:
+    format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  detailed:
+    format: "%(asctime)s - %(name)s - %(levelname)s - [%(process)d:%(thread)d] - %(filename)s:%(lineno)d - %(message)s"
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    level: INFO
+    formatter: standard
+  file:
+    class: logging.handlers.RotatingFileHandler
+    level: INFO
+    formatter: detailed
+    filename: logs/snapshot.log
+    maxBytes: 10485760  # 10MB
+    backupCount: 5
+
+loggers:
+  financial_snapshot:
+    level: INFO
+    handlers: [console, file]
 ```
 
 ### Environment Variables

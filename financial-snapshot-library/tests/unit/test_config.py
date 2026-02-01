@@ -93,18 +93,6 @@ class TestDatabaseConfig(unittest.TestCase):
         self.assertIn("db.example.com:5432", conn_str)
         self.assertIn("mydb", conn_str)
     
-    def test_mysql_connection_string(self):
-        """Test MySQL connection string generation."""
-        config = DatabaseConfig(
-            driver="mysql",
-            host="mysql.example.com",
-            database="mydb",
-        )
-        
-        conn_str = config.get_connection_string()
-        
-        self.assertIn("mysql+pymysql://", conn_str)
-    
     def test_mssql_connection_string(self):
         """Test MSSQL connection string generation."""
         config = DatabaseConfig(
