@@ -1,15 +1,18 @@
 # Financial Snapshot Library
 
-A robust, high-performance Python library for capturing snapshots of live financial positions from Apache Kafka and storing them in SQL databases with optimal performance and reliability.
+A robust, high-performance Python library for **continuously consuming** live financial positions from Apache Kafka and taking **periodic snapshots** (every 5 minutes) to SQL databases with zero data loss and optimal performance.
 
 Built with industry-standard libraries: **Pydantic** for configuration validation, **confluent-kafka** for high-performance message consumption, and **pandas** for efficient data processing.
 
 ## Features
 
-- **Reliable Data Capture**: Consume financial position records from Kafka every 5 minutes without data loss
+- **Continuous Consumption**: Continuously listens to Kafka topic and buffers messages in real-time
+- **Periodic Snapshots**: Automatically flushes buffered records to SQL every 5 minutes (configurable)
+- **Zero Data Loss**: Transactional writes with Kafka offset commit only after successful DB write
+- **Proper Offset Management**: Per-partition offset tracking with manual commit for exactly-once semantics
 - **High Performance**: Batch processing with connection pooling for minimal database pressure
 - **Data Quality**: Built-in validation and deduplication using pandas
-- **Flexible Configuration**: Pydantic-based configuration with JSON files, environment variables, or programmatic setup
+- **Flexible Configuration**: Pydantic-based configuration with YAML files, environment variables, or programmatic setup
 - **Multiple Database Support**: PostgreSQL and SQL Server (via pyodbc)
 - **Robust Error Handling**: Automatic retries with exponential backoff
 - **Comprehensive Logging**: Structured logging with performance metrics
@@ -20,33 +23,56 @@ Built with industry-standard libraries: **Pydantic** for configuration validatio
 - **Pydantic 2.5+**: Type-safe configuration with automatic validation
 - **confluent-kafka 2.3+**: High-performance C-based Kafka client
 - **pandas 2.1+**: Efficient data manipulation and batch operations
+- **PyYAML 6.0+**: YAML configuration file support
 - **SQLAlchemy 2.0+**: Database abstraction and connection pooling
 - **pyodbc 5.0+**: SQL Server connectivity
 
 ## Architecture
 
-The library follows a modular, layered architecture:
+**Continuous Consumption with Periodic Snapshot Flushing**
 
 ```
-┌─────────────────────────────────────────────────────┐
-│             Snapshot Manager                        │
-│         (Orchestration & Scheduling)                │
-└──────────────┬──────────────────┬───────────────────┘
-               │                  │
-    ┌──────────▼──────────┐  ┌───▼──────────────────┐
-    │  Kafka Consumer     │  │   SQL Writer          │
-    │  (Message Queue)    │  │   (Database)          │
-    └──────────┬──────────┘  └───┬──────────────────┘
-               │                  │
-    ┌──────────▼──────────────────▼───────────────────┐
-    │        Utilities (Logging, Validation)          │
-    └─────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    Snapshot Manager                         │
+│  ┌────────────────────────┐  ┌──────────────────────────┐   │
+│  │   Consumer Thread      │  │   Snapshot Thread        │   │
+│  │  (Continuous)          │  │   (Every 5 min)          │   │
+│  │                        │  │                          │   │
+│  │  1. Poll Kafka         │  │  1. Get buffered records │   │
+│  │  2. Buffer messages    │  │  2. Validate & dedupe    │   │
+│  │  3. Repeat             │  │  3. Write to SQL (tx)    │   │
+│  │                        │  │  4. Commit offsets       │   │
+│  │                        │  │  5. Clear buffer         │   │
+│  └────────┬───────────────┘  └──────────┬───────────────┘   │
+│           │                             │                   │
+│           └────────▶ Thread-Safe ◀──────┘                   │
+│                      Buffer                                 │
+└─────────────────────────────────────────────────────────────┘
+              │                              │
+    ┌─────────▼────────┐          ┌─────────▼──────────┐
+    │  Kafka Topic     │          │  SQL Server Table  │
+    │  (Source)        │          │  (Destination)     │
+    └──────────────────┘          └────────────────────┘
 ```
+
+### Key Design Decisions
+
+1. **Two-Thread Architecture**: 
+   - Consumer thread continuously polls Kafka and buffers messages
+   - Snapshot thread periodically flushes buffer to SQL
+
+2. **Buffer Management**: Thread-safe in-memory buffer for messages between consumption and snapshot
+
+3. **Transactional Writes**: Single SQL transaction for all records in a snapshot
+
+4. **Offset Commit After Write**: Kafka offsets committed ONLY after successful DB transaction (no data loss)
+
+5. **Per-Partition Tracking**: confluent-kafka automatically manages offsets per TopicPartition
 
 ### Components
 
-1. **Snapshot Manager**: Orchestrates the entire snapshot process with scheduling
-2. **Kafka Consumer**: Handles message consumption with batching and offset management
+1. **Snapshot Manager**: Orchestrates continuous consumption and periodic snapshot flushing
+2. **Kafka Consumer**: Handles message consumption with batching and per-partition offset management
 3. **SQL Writer**: Manages database operations with connection pooling and batch inserts
 4. **Utilities**: Logging, validation, deduplication, and data transformation
 
@@ -70,8 +96,8 @@ pip install -e .
 ```python
 from financial_snapshot import SnapshotManager, Config
 
-# Load configuration from file
-config = Config.from_file("config/config.json")
+# Load configuration from YAML file
+config = Config.from_file("config/dev.yaml")
 
 # Or use environment variables
 config = Config.from_env()
@@ -80,24 +106,65 @@ config = Config.from_env()
 manager = SnapshotManager(config)
 manager.start()
 
-# The manager will now capture snapshots every 5 minutes
-# Stop it when done
+# The manager will now:
+# 1. Continuously consume messages from Kafka and buffer them
+# 2. Every 5 minutes, flush buffered records to SQL in a single transaction
+# 3. Commit Kafka offsets only after successful write
+
+# Stop it when done (flushes remaining buffer)
 manager.stop()
 ```
 
-### Using Context Manager
+### Using Context Manager (Recommended)
 
 ```python
 from financial_snapshot import SnapshotManager, Config
 
-config = Config.from_file("config/config.json")
+config = Config.from_file("config/prod.yaml")
 
-# Automatically handles start/stop
+# Automatically handles start/stop and graceful shutdown
 with SnapshotManager(config) as manager:
-    # Manager is running
-    # Snapshots are captured automatically
-    pass  # or run your application
+    # Manager is running with:
+    # - Consumer thread continuously buffering messages
+    # - Snapshot thread flushing every 5 minutes
+    
+    # Monitor metrics
+    import time
+    while True:
+        metrics = manager.get_metrics()
+        print(f"Buffer size: {metrics['buffer_size']}")
+        print(f"Total consumed: {metrics['total_records_consumed']}")
+        print(f"Total written: {metrics['total_records_written']}")
+        time.sleep(60)
 ```
+
+### How It Works
+
+**Continuous Consumption + Periodic Snapshots:**
+
+1. **Consumer Thread** (runs continuously):
+   ```
+   while not stopped:
+       - Poll Kafka (1 second timeout)
+       - Add messages to thread-safe buffer
+       - Update metrics
+   ```
+
+2. **Snapshot Thread** (runs every 5 minutes):
+   ```
+   every 5 minutes:
+       - Get all buffered records (thread-safe)
+       - Validate records
+       - Deduplicate if enabled
+       - Write to SQL in single transaction
+       - Commit Kafka offsets (ONLY after success)
+       - Clear buffer
+   ```
+
+3. **On Failure**:
+   - If SQL write fails: records remain in buffer, offsets NOT committed
+   - On next attempt: same records are reprocessed
+   - Result: **Zero data loss guarantee**
 
 ### One-Time Snapshot
 
