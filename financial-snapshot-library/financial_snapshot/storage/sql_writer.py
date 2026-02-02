@@ -42,6 +42,8 @@ class FinancialPositionWriter:
     
     Handles batch inserts, connection pooling, and transaction management
     for optimal database performance and reliability.
+    
+    Supports multiple tables for different record types (PnL, Risk, etc.)
     """
     
     def __init__(
@@ -62,6 +64,7 @@ class FinancialPositionWriter:
         self.engine: Optional[Engine] = None
         self.metadata = MetaData()
         self.table: Optional[Table] = None
+        self.tables: Dict[str, Table] = {}  # Multiple tables support
         self._is_connected = False
     
     def connect(self) -> None:
@@ -106,10 +109,11 @@ class FinancialPositionWriter:
                     pyodbc_version=pyodbc.version,
                 )
             
-            # Define table schema
-            self._define_table()
+            # Define table schemas
+            self._define_table()  # Legacy single table
+            self._define_multi_tables()  # New multi-table support
             
-            # Create table if it doesn't exist
+            # Create tables if they don't exist
             self.metadata.create_all(self.engine)
             
             self._is_connected = True
@@ -150,6 +154,63 @@ class FinancialPositionWriter:
                 "created_at",
             ),
         )
+    
+    def _define_multi_tables(self) -> None:
+        """Define multiple tables for different record types (PnL, Risk, etc.)."""
+        # PnLItd table for PnL records
+        pnl_table = Table(
+            "PnLItd",
+            self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("snapshot_id", String(100), nullable=False, index=True),
+            Column("position_id", String(100), nullable=False, index=True),
+            Column("account_id", String(100), nullable=False, index=True),
+            Column("symbol", String(50), nullable=False),
+            Column("quantity", Float, nullable=False),
+            Column("market_value", Float, nullable=True),
+            Column("cost_basis", Float, nullable=True),
+            Column("unrealized_pnl", Float, nullable=True),
+            Column("realized_pnl", Float, nullable=True),
+            Column("package_name", String(50), nullable=True),
+            Column("kafka_partition", Integer, nullable=True),
+            Column("kafka_offset", Integer, nullable=True),
+            Column("kafka_timestamp", DateTime, nullable=True),
+            Column("consumed_at", DateTime, nullable=True),
+            Column("created_at", DateTime, default=datetime.utcnow, nullable=False),
+            
+            # Indexes for common queries
+            Index("idx_pnlitd_snapshot_account", "snapshot_id", "account_id"),
+            Index("idx_pnlitd_created_at", "created_at"),
+        )
+        self.tables["PnLItd"] = pnl_table
+        
+        # RiskItd table for Risk records
+        risk_table = Table(
+            "RiskItd",
+            self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("snapshot_id", String(100), nullable=False, index=True),
+            Column("position_id", String(100), nullable=False, index=True),
+            Column("account_id", String(100), nullable=False, index=True),
+            Column("symbol", String(50), nullable=False),
+            Column("quantity", Float, nullable=False),
+            Column("market_value", Float, nullable=True),
+            Column("var_95", Float, nullable=True),  # Value at Risk 95%
+            Column("var_99", Float, nullable=True),  # Value at Risk 99%
+            Column("expected_shortfall", Float, nullable=True),
+            Column("beta", Float, nullable=True),
+            Column("package_name", String(50), nullable=True),
+            Column("kafka_partition", Integer, nullable=True),
+            Column("kafka_offset", Integer, nullable=True),
+            Column("kafka_timestamp", DateTime, nullable=True),
+            Column("consumed_at", DateTime, nullable=True),
+            Column("created_at", DateTime, default=datetime.utcnow, nullable=False),
+            
+            # Indexes for common queries
+            Index("idx_riskitd_snapshot_account", "snapshot_id", "account_id"),
+            Index("idx_riskitd_created_at", "created_at"),
+        )
+        self.tables["RiskItd"] = risk_table
     
     def disconnect(self) -> None:
         """Disconnect from database."""
@@ -407,6 +468,136 @@ class FinancialPositionWriter:
         except SQLAlchemyError as e:
             self.logger.error("Failed to count records", error=str(e))
             raise
+    
+    def write_multi_table_batch(
+        self,
+        records_by_type: Dict[str, List[Dict[str, Any]]],
+        snapshot_id: str,
+    ) -> Dict[str, int]:
+        """
+        Write records to multiple tables based on packageName routing.
+        
+        Args:
+            records_by_type: Dictionary mapping table names to record lists
+                            e.g., {"PnLItd": [...], "RiskItd": [...]}
+            snapshot_id: Unique identifier for this snapshot
+            
+        Returns:
+            Dictionary mapping table names to count of records written
+            
+        Raises:
+            RuntimeError: If writer is not connected
+            SQLAlchemyError: If write operation fails
+        """
+        if not self._is_connected or not self.engine:
+            raise RuntimeError("Writer is not connected. Call connect() first.")
+        
+        results = {}
+        total_written = 0
+        
+        for table_name, records in records_by_type.items():
+            if not records:
+                self.logger.debug(f"No records to write for table {table_name}")
+                results[table_name] = 0
+                continue
+            
+            start_time = time.time()
+            
+            try:
+                # Convert records to DataFrame
+                df = self._records_to_dataframe_for_table(records, snapshot_id, table_name)
+                
+                # Write to specific table using pandas
+                record_count = len(df)
+                
+                df.to_sql(
+                    name=table_name,
+                    con=self.engine,
+                    if_exists='append',
+                    index=False,
+                    method='multi',
+                    chunksize=self.config.batch_size,
+                )
+                
+                duration = time.time() - start_time
+                self.logger.log_database_write(
+                    table=table_name,
+                    record_count=record_count,
+                    duration_seconds=duration,
+                )
+                
+                results[table_name] = record_count
+                total_written += record_count
+                
+            except SQLAlchemyError as e:
+                self.logger.error(
+                    f"Failed to write batch to table {table_name}",
+                    record_count=len(records),
+                    error=str(e),
+                )
+                raise
+        
+        self.logger.info(
+            "Successfully wrote records to multiple tables",
+            snapshot_id=snapshot_id,
+            total_written=total_written,
+            tables=list(results.keys()),
+        )
+        
+        return results
+    
+    def _records_to_dataframe_for_table(
+        self,
+        records: List[Dict[str, Any]],
+        snapshot_id: str,
+        table_name: str,
+    ) -> pd.DataFrame:
+        """
+        Convert records list to pandas DataFrame for a specific table.
+        
+        Args:
+            records: List of records
+            snapshot_id: Snapshot identifier
+            table_name: Target table name (PnLItd or RiskItd)
+            
+        Returns:
+            DataFrame with records formatted for the target table
+        """
+        data = []
+        
+        for record in records:
+            value = record.get("value", {})
+            
+            # Common fields for all tables
+            row = {
+                "snapshot_id": snapshot_id,
+                "position_id": value.get("position_id", ""),
+                "account_id": value.get("account_id", ""),
+                "symbol": value.get("symbol", ""),
+                "quantity": float(value.get("quantity", 0)),
+                "market_value": float(value.get("market_value")) if value.get("market_value") is not None else None,
+                "package_name": value.get("packageName", ""),
+                "kafka_partition": record.get("partition"),
+                "kafka_offset": record.get("offset"),
+                "kafka_timestamp": pd.to_datetime(record.get("timestamp"), unit='ms', errors='coerce') if record.get("timestamp") else None,
+                "consumed_at": pd.to_datetime(record.get("consumed_at"), errors='coerce') if record.get("consumed_at") else None,
+                "created_at": datetime.utcnow(),
+            }
+            
+            # Table-specific fields
+            if table_name == "PnLItd":
+                row["cost_basis"] = float(value.get("cost_basis")) if value.get("cost_basis") is not None else None
+                row["unrealized_pnl"] = float(value.get("unrealized_pnl")) if value.get("unrealized_pnl") is not None else None
+                row["realized_pnl"] = float(value.get("realized_pnl")) if value.get("realized_pnl") is not None else None
+            elif table_name == "RiskItd":
+                row["var_95"] = float(value.get("var_95")) if value.get("var_95") is not None else None
+                row["var_99"] = float(value.get("var_99")) if value.get("var_99") is not None else None
+                row["expected_shortfall"] = float(value.get("expected_shortfall")) if value.get("expected_shortfall") is not None else None
+                row["beta"] = float(value.get("beta")) if value.get("beta") is not None else None
+            
+            data.append(row)
+        
+        return pd.DataFrame(data)
     
     def __enter__(self):
         """Context manager entry."""

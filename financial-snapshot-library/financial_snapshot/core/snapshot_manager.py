@@ -69,8 +69,9 @@ class SnapshotManager:
                 key_fields=self.config.snapshot.deduplication_keys,
             )
         
-        # Buffer for continuous consumption
-        self._buffer: List[Dict[str, Any]] = []
+        # Buffers for continuous consumption (separate by record type)
+        self._pnl_buffer: List[Dict[str, Any]] = []
+        self._risk_buffer: List[Dict[str, Any]] = []
         self._buffer_lock = Lock()
         
         # Threading
@@ -84,11 +85,15 @@ class SnapshotManager:
             "total_records_consumed": 0,
             "total_records_processed": 0,
             "total_records_written": 0,
+            "total_pnl_records": 0,
+            "total_risk_records": 0,
+            "total_unrouted_records": 0,
             "total_invalid_records": 0,
             "total_errors": 0,
             "last_snapshot_time": None,
             "last_snapshot_duration": None,
-            "buffer_size": 0,
+            "pnl_buffer_size": 0,
+            "risk_buffer_size": 0,
         }
     
     def start(self) -> None:
@@ -108,10 +113,11 @@ class SnapshotManager:
         self.consumer.connect()
         self.writer.connect()
         
-        # Clear stop event and buffer
+        # Clear stop event and buffers
         self._stop_event.clear()
         with self._buffer_lock:
-            self._buffer.clear()
+            self._pnl_buffer.clear()
+            self._risk_buffer.clear()
         
         # Start consumer thread (continuously consumes and buffers)
         self._consumer_thread = Thread(target=self._run_consumer, daemon=True)
@@ -170,18 +176,50 @@ class SnapshotManager:
                 )
                 
                 if records:
-                    # Add to buffer
+                    # Route records to appropriate buffers based on packageName
+                    pnl_records = []
+                    risk_records = []
+                    unrouted_records = []
+                    
+                    for record in records:
+                        value = record.get("value", {})
+                        package_name = value.get("packageName", "")
+                        
+                        if package_name == "PnlRecords":
+                            pnl_records.append(record)
+                        elif package_name == "RiskRecords":
+                            risk_records.append(record)
+                        else:
+                            unrouted_records.append(record)
+                            self.logger.warning(
+                                "Record with unknown packageName",
+                                package_name=package_name,
+                                position_id=value.get("position_id", "unknown"),
+                            )
+                    
+                    # Add to respective buffers
                     with self._buffer_lock:
-                        self._buffer.extend(records)
-                        buffer_size = len(self._buffer)
+                        self._pnl_buffer.extend(pnl_records)
+                        self._risk_buffer.extend(risk_records)
+                        pnl_size = len(self._pnl_buffer)
+                        risk_size = len(self._risk_buffer)
                     
                     self.logger.debug(
                         "Consumed and buffered records",
-                        count=len(records),
-                        buffer_size=buffer_size,
+                        total_count=len(records),
+                        pnl_count=len(pnl_records),
+                        risk_count=len(risk_records),
+                        unrouted_count=len(unrouted_records),
+                        pnl_buffer_size=pnl_size,
+                        risk_buffer_size=risk_size,
                     )
+                    
                     self.metrics["total_records_consumed"] += len(records)
-                    self.metrics["buffer_size"] = buffer_size
+                    self.metrics["total_pnl_records"] += len(pnl_records)
+                    self.metrics["total_risk_records"] += len(risk_records)
+                    self.metrics["total_unrouted_records"] += len(unrouted_records)
+                    self.metrics["pnl_buffer_size"] = pnl_size
+                    self.metrics["risk_buffer_size"] = risk_size
                     consecutive_empty_polls = 0
                 else:
                     consecutive_empty_polls += 1
@@ -240,12 +278,12 @@ class SnapshotManager:
         Flush buffered records to database and commit offsets.
         
         This is the core snapshot operation:
-        1. Get all buffered records (thread-safe)
-        2. Validate records
+        1. Get all buffered records for both types (thread-safe)
+        2. Validate records for each type
         3. Deduplicate if enabled
-        4. Write to database in single transaction
-        5. Commit Kafka offsets only after successful write
-        6. Clear buffer
+        4. Write to both tables (PnLItd and RiskItd) in single transaction
+        5. Commit Kafka offsets only after successful write to BOTH tables
+        6. Clear both buffers
         
         Returns:
             Dictionary containing snapshot metrics
@@ -253,18 +291,24 @@ class SnapshotManager:
         snapshot_id = self._generate_snapshot_id()
         start_time = time.time()
         
-        # Get buffered records and clear buffer (atomic operation)
+        # Get buffered records from both buffers (atomic operation)
         with self._buffer_lock:
-            records = self._buffer.copy()
-            buffer_size_before = len(self._buffer)
+            pnl_records = self._pnl_buffer.copy()
+            risk_records = self._risk_buffer.copy()
+            pnl_buffer_size_before = len(self._pnl_buffer)
+            risk_buffer_size_before = len(self._risk_buffer)
         
-        if not records:
+        total_records = len(pnl_records) + len(risk_records)
+        
+        if total_records == 0:
             self.logger.debug("No buffered records to flush")
             return {
                 "snapshot_id": snapshot_id,
                 "success": True,
-                "records_buffered": 0,
-                "records_written": 0,
+                "pnl_records_buffered": 0,
+                "risk_records_buffered": 0,
+                "pnl_records_written": 0,
+                "risk_records_written": 0,
                 "duration_seconds": 0,
             }
         
@@ -272,16 +316,22 @@ class SnapshotManager:
         self.logger.info(
             "Flushing buffered records",
             snapshot_id=snapshot_id,
-            buffer_size=len(records),
+            pnl_buffer_size=len(pnl_records),
+            risk_buffer_size=len(risk_records),
+            total_buffer_size=total_records,
         )
         
         result = {
             "snapshot_id": snapshot_id,
             "success": False,
-            "records_buffered": len(records),
-            "records_valid": 0,
-            "records_written": 0,
-            "records_invalid": 0,
+            "pnl_records_buffered": len(pnl_records),
+            "risk_records_buffered": len(risk_records),
+            "pnl_records_valid": 0,
+            "risk_records_valid": 0,
+            "pnl_records_written": 0,
+            "risk_records_written": 0,
+            "pnl_records_invalid": 0,
+            "risk_records_invalid": 0,
             "duration_seconds": 0,
             "error": None,
         }
@@ -291,55 +341,97 @@ class SnapshotManager:
         
         while retry_count <= max_retries:
             try:
-                # Validate records
-                valid_records, invalid_records = DataValidator.validate_batch(records)
-                result["records_valid"] = len(valid_records)
-                result["records_invalid"] = len(invalid_records)
-                
-                if invalid_records:
-                    self.logger.warning(
-                        "Invalid records found",
-                        count=len(invalid_records),
-                    )
-                    for record, error in invalid_records[:5]:  # Log first 5
-                        self.logger.debug("Invalid record", error=error)
-                
-                # Deduplicate if enabled
-                if self.deduplicator and valid_records:
-                    original_count = len(valid_records)
-                    valid_records = self.deduplicator.deduplicate(valid_records)
-                    dedup_count = original_count - len(valid_records)
+                # Process PnL records
+                pnl_valid_records = []
+                if pnl_records:
+                    pnl_valid, pnl_invalid = DataValidator.validate_batch(pnl_records)
+                    result["pnl_records_valid"] = len(pnl_valid)
+                    result["pnl_records_invalid"] = len(pnl_invalid)
                     
-                    if dedup_count > 0:
-                        self.logger.info(
-                            "Deduplicated records",
-                            removed=dedup_count,
-                            remaining=len(valid_records),
+                    if pnl_invalid:
+                        self.logger.warning(
+                            "Invalid PnL records found",
+                            count=len(pnl_invalid),
                         )
+                    
+                    # Deduplicate if enabled
+                    if self.deduplicator and pnl_valid:
+                        original_count = len(pnl_valid)
+                        pnl_valid = self.deduplicator.deduplicate(pnl_valid)
+                        dedup_count = original_count - len(pnl_valid)
+                        
+                        if dedup_count > 0:
+                            self.logger.info(
+                                "Deduplicated PnL records",
+                                removed=dedup_count,
+                                remaining=len(pnl_valid),
+                            )
+                    
+                    pnl_valid_records = pnl_valid
                 
-                # Write to database in single transaction
-                if valid_records:
-                    records_written = self.writer.write_batch(
-                        records=valid_records,
+                # Process Risk records
+                risk_valid_records = []
+                if risk_records:
+                    risk_valid, risk_invalid = DataValidator.validate_batch(risk_records)
+                    result["risk_records_valid"] = len(risk_valid)
+                    result["risk_records_invalid"] = len(risk_invalid)
+                    
+                    if risk_invalid:
+                        self.logger.warning(
+                            "Invalid Risk records found",
+                            count=len(risk_invalid),
+                        )
+                    
+                    # Deduplicate if enabled
+                    if self.deduplicator and risk_valid:
+                        original_count = len(risk_valid)
+                        risk_valid = self.deduplicator.deduplicate(risk_valid)
+                        dedup_count = original_count - len(risk_valid)
+                        
+                        if dedup_count > 0:
+                            self.logger.info(
+                                "Deduplicated Risk records",
+                                removed=dedup_count,
+                                remaining=len(risk_valid),
+                            )
+                    
+                    risk_valid_records = risk_valid
+                
+                # Write to both tables in single transaction context
+                # This ensures atomicity - both writes succeed or both fail
+                if pnl_valid_records or risk_valid_records:
+                    records_by_type = {}
+                    if pnl_valid_records:
+                        records_by_type["PnLItd"] = pnl_valid_records
+                    if risk_valid_records:
+                        records_by_type["RiskItd"] = risk_valid_records
+                    
+                    write_results = self.writer.write_multi_table_batch(
+                        records_by_type=records_by_type,
                         snapshot_id=snapshot_id,
                     )
-                    result["records_written"] = records_written
+                    
+                    result["pnl_records_written"] = write_results.get("PnLItd", 0)
+                    result["risk_records_written"] = write_results.get("RiskItd", 0)
                     
                     self.logger.info(
-                        "Successfully wrote records to database",
+                        "Successfully wrote records to multiple tables",
                         snapshot_id=snapshot_id,
-                        records_written=records_written,
+                        pnl_records_written=result["pnl_records_written"],
+                        risk_records_written=result["risk_records_written"],
                     )
                 
-                # CRITICAL: Commit Kafka offsets ONLY after successful DB write
+                # CRITICAL: Commit Kafka offsets ONLY after successful DB writes to BOTH tables
                 # This ensures exactly-once semantics and no data loss
                 self.consumer.commit()
-                self.logger.info("Committed Kafka offsets after successful write")
+                self.logger.info("Committed Kafka offsets after successful writes to both tables")
                 
-                # Clear buffer now that write and commit succeeded
+                # Clear both buffers now that write and commit succeeded
                 with self._buffer_lock:
-                    self._buffer.clear()
-                    self.metrics["buffer_size"] = 0
+                    self._pnl_buffer.clear()
+                    self._risk_buffer.clear()
+                    self.metrics["pnl_buffer_size"] = 0
+                    self.metrics["risk_buffer_size"] = 0
                 
                 result["success"] = True
                 break
@@ -364,11 +456,12 @@ class SnapshotManager:
                     )
                     self.metrics["total_errors"] += 1
                     
-                    # NOTE: Buffer is NOT cleared on failure
-                    # Records remain in buffer for next flush attempt
+                    # NOTE: Buffers are NOT cleared on failure
+                    # Records remain in buffers for next flush attempt
                     self.logger.warning(
-                        "Records remain in buffer due to failure",
-                        buffer_size=buffer_size_before,
+                        "Records remain in buffers due to failure",
+                        pnl_buffer_size=pnl_buffer_size_before,
+                        risk_buffer_size=risk_buffer_size_before,
                     )
         
         # Calculate duration and update metrics
@@ -376,17 +469,22 @@ class SnapshotManager:
         result["duration_seconds"] = duration
         
         if result["success"]:
+            total_written = result["pnl_records_written"] + result["risk_records_written"]
             self.logger.log_snapshot_complete(
                 snapshot_id=snapshot_id,
-                record_count=result["records_written"],
+                record_count=total_written,
                 duration_seconds=duration,
             )
             
             # Update metrics
             self.metrics["total_snapshots"] += 1
-            self.metrics["total_records_processed"] += result["records_buffered"]
-            self.metrics["total_records_written"] += result["records_written"]
-            self.metrics["total_invalid_records"] += result["records_invalid"]
+            self.metrics["total_records_processed"] += (
+                result["pnl_records_buffered"] + result["risk_records_buffered"]
+            )
+            self.metrics["total_records_written"] += total_written
+            self.metrics["total_invalid_records"] += (
+                result["pnl_records_invalid"] + result["risk_records_invalid"]
+            )
             self.metrics["last_snapshot_time"] = datetime.utcnow().isoformat()
             self.metrics["last_snapshot_duration"] = duration
         
@@ -408,21 +506,36 @@ class SnapshotManager:
         Get current metrics.
         
         Returns:
-            Dictionary of metrics including current buffer size
+            Dictionary of metrics including current buffer sizes
         """
         with self._buffer_lock:
-            self.metrics["buffer_size"] = len(self._buffer)
+            self.metrics["pnl_buffer_size"] = len(self._pnl_buffer)
+            self.metrics["risk_buffer_size"] = len(self._risk_buffer)
         return self.metrics.copy()
+    
+    def get_buffer_sizes(self) -> Dict[str, int]:
+        """
+        Get current buffer sizes for both record types.
+        
+        Returns:
+            Dictionary with pnl and risk buffer sizes
+        """
+        with self._buffer_lock:
+            return {
+                "pnl": len(self._pnl_buffer),
+                "risk": len(self._risk_buffer),
+                "total": len(self._pnl_buffer) + len(self._risk_buffer),
+            }
     
     def get_buffer_size(self) -> int:
         """
-        Get current buffer size.
+        Get total current buffer size (legacy method).
         
         Returns:
-            Number of records currently buffered
+            Total number of records currently buffered
         """
         with self._buffer_lock:
-            return len(self._buffer)
+            return len(self._pnl_buffer) + len(self._risk_buffer)
     
     def run_once(self) -> Dict[str, Any]:
         """
