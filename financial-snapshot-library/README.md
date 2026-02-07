@@ -2,7 +2,7 @@
 
 ## UV Setup In PowerShell
 
-- cd C:\001-SourceCode\901-financial_snapshot_lib\financial-snapshot-library
+- > cd C:\001-SourceCode\901-financial_snapshot_lib\financial-snapshot-library
 - > uv venv
 - > uv init
   (set up the initial file structure, including a basic pyproject.toml, is by running uv init in your project's root directory)
