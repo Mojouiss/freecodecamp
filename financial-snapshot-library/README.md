@@ -1,28 +1,27 @@
-# UV Setup
+# Financial Snapshot Library
 
-In PowerShell:
-> cd C:\001-SourceCode\901-financial_snapshot_lib\financial-snapshot-library
-> uv venv
-> uv init
+## UV Setup In PowerShell
+
+- cd C:\001-SourceCode\901-financial_snapshot_lib\financial-snapshot-library
+- > uv venv
+- > uv init
   (set up the initial file structure, including a basic pyproject.toml, is by running uv init in your project's root directory)
-> uv pip install -r requirements.txt
+- > uv pip install -r requirements.txt
   (install dependencies from requirements.txt in new UV env created above)
-> .venv\Scripts\Activate.ps1
+- > .venv\Scripts\Activate.ps1
   (Activate the environment - optional for most uv commands
   For standard uv commands (like uv run or uv pip install), the environment is used automatically. However, for running scripts directly (e.g., python script.py) or using other tools, you may need to activate it
   )
-> uv pip sync requirements.txt
+- > uv pip sync requirements.txt
   (To sync your uv environment with a requirements.txt)
-> uv add -r requirements.txt
+- > uv add -r requirements.txt
   (To Add dependencies from requirements.txt + Add them to the [project.dependencies] section of your pyproject.toml file, create or update a uv.lock file, and install the dependencies in your project environment)
-
-> uv init --bare
+- > uv init --bare
   (Initialize a uv project, which creates a pyproject.toml file)
-> uv add -r requirements.txt
+- > uv add -r requirements.txt
   (Import the dependencies from your requirements.txt into the pyproject.toml file)
 
-
-# Financial Snapshot Library
+## Overview
 
 A robust, high-performance Python library for **continuously consuming** live financial positions from Apache Kafka and taking **periodic snapshots** (every 5 minutes) to SQL databases with zero data loss and optimal performance.
 
