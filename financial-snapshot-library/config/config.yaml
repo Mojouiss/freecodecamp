@@ -1,0 +1,37 @@
+kafka:
+  bootstrap_servers: localhost:9092
+  topic: financial_positions
+  group_id: financial_snapshot_consumer
+  auto_offset_reset: earliest
+  max_poll_records: 500
+  session_timeout_ms: 30000
+  max_poll_interval_ms: 300000
+
+database:
+  driver: postgresql
+  host: localhost
+  port: 5432
+  database: financial_db
+  username: postgres
+  password: your_password_here
+  table_name: financial_positions
+  pool_size: 5
+  max_overflow: 10
+  pool_timeout: 30
+  batch_size: 1000
+
+snapshot:
+  interval_seconds: 300
+  processing_timeout_seconds: 240
+  max_retries: 3
+  retry_backoff_seconds: 5
+  enable_deduplication: true
+  deduplication_keys:
+    - position_id
+    - account_id
+
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  log_file: logs/snapshot.log
+  enable_console: true

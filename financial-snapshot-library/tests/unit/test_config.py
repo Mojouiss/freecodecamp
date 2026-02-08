@@ -1,0 +1,281 @@
+"""
+Unit tests for configuration module with Pydantic.
+"""
+
+import unittest
+import json
+import tempfile
+import os
+from pathlib import Path
+
+from financial_snapshot.core.config import (
+    Config,
+    KafkaConfig,
+    DatabaseConfig,
+    SnapshotConfig,
+    LoggingConfig,
+)
+
+
+class TestKafkaConfig(unittest.TestCase):
+    """Test KafkaConfig class with Pydantic."""
+    
+    def test_default_values(self):
+        """Test default configuration values."""
+        config = KafkaConfig()
+        
+        self.assertEqual(config.bootstrap_servers, "localhost:9092")
+        self.assertEqual(config.topic, "financial_positions")
+        self.assertEqual(config.group_id, "financial_snapshot_consumer")
+        self.assertEqual(config.max_poll_records, 500)
+        self.assertFalse(config.enable_auto_commit)
+    
+    def test_to_confluent_config(self):
+        """Test conversion to confluent-kafka config."""
+        config = KafkaConfig(
+            bootstrap_servers="kafka1:9092,kafka2:9092",
+            topic="test_topic",
+        )
+        
+        confluent_config = config.to_confluent_config()
+        
+        self.assertEqual(confluent_config["bootstrap.servers"], "kafka1:9092,kafka2:9092")
+        self.assertEqual(confluent_config["group.id"], "financial_snapshot_consumer")
+        self.assertIn("auto.offset.reset", confluent_config)
+    
+    def test_custom_values(self):
+        """Test custom configuration values."""
+        config = KafkaConfig(
+            bootstrap_servers="custom:9092",
+            topic="custom_topic",
+            max_poll_records=1000,
+        )
+        
+        self.assertEqual(config.bootstrap_servers, "custom:9092")
+        self.assertEqual(config.topic, "custom_topic")
+        self.assertEqual(config.max_poll_records, 1000)
+    
+    def test_validation(self):
+        """Test Pydantic validation."""
+        # Test invalid max_poll_records (must be >= 1)
+        with self.assertRaises(Exception):
+            KafkaConfig(max_poll_records=0)
+
+
+class TestDatabaseConfig(unittest.TestCase):
+    """Test DatabaseConfig class with Pydantic."""
+    
+    def test_default_values(self):
+        """Test default configuration values."""
+        config = DatabaseConfig()
+        
+        self.assertEqual(config.driver, "postgresql")
+        self.assertEqual(config.host, "localhost")
+        self.assertEqual(config.port, 5432)
+        self.assertEqual(config.database, "financial_db")
+        self.assertEqual(config.batch_size, 1000)
+    
+    def test_postgresql_connection_string(self):
+        """Test PostgreSQL connection string generation."""
+        config = DatabaseConfig(
+            driver="postgresql",
+            host="db.example.com",
+            port=5432,
+            database="mydb",
+            username="user",
+            password="pass",
+        )
+        
+        conn_str = config.get_connection_string()
+        
+        self.assertIn("postgresql://", conn_str)
+        self.assertIn("user:pass", conn_str)
+        self.assertIn("db.example.com:5432", conn_str)
+        self.assertIn("mydb", conn_str)
+    
+    def test_mssql_connection_string(self):
+        """Test MSSQL connection string generation."""
+        config = DatabaseConfig(
+            driver="mssql",
+            host="sqlserver.example.com",
+            database="mydb",
+        )
+        
+        conn_str = config.get_connection_string()
+        
+        self.assertIn("mssql+pyodbc://", conn_str)
+    
+    def test_invalid_driver(self):
+        """Test invalid driver raises error."""
+        with self.assertRaises(Exception):
+            DatabaseConfig(driver="invalid")
+    
+    def test_validation(self):
+        """Test Pydantic validation."""
+        # Test invalid port (must be 1-65535)
+        with self.assertRaises(Exception):
+            DatabaseConfig(port=0)
+        
+        with self.assertRaises(Exception):
+            DatabaseConfig(port=70000)
+
+
+class TestSnapshotConfig(unittest.TestCase):
+    """Test SnapshotConfig class with Pydantic."""
+    
+    def test_default_values(self):
+        """Test default configuration values."""
+        config = SnapshotConfig()
+        
+        self.assertEqual(config.interval_seconds, 300)
+        self.assertEqual(config.max_retries, 3)
+        self.assertTrue(config.enable_deduplication)
+        self.assertEqual(config.deduplication_keys, ["position_id", "account_id"])
+    
+    def test_custom_values(self):
+        """Test custom configuration values."""
+        config = SnapshotConfig(
+            interval_seconds=600,
+            max_retries=5,
+            enable_deduplication=False,
+        )
+        
+        self.assertEqual(config.interval_seconds, 600)
+        self.assertEqual(config.max_retries, 5)
+        self.assertFalse(config.enable_deduplication)
+
+
+class TestConfig(unittest.TestCase):
+    """Test main Config class with Pydantic."""
+    
+    def test_default_initialization(self):
+        """Test default configuration initialization."""
+        config = Config()
+        
+        self.assertIsInstance(config.kafka, KafkaConfig)
+        self.assertIsInstance(config.database, DatabaseConfig)
+        self.assertIsInstance(config.snapshot, SnapshotConfig)
+        self.assertIsInstance(config.logging, LoggingConfig)
+    
+    def test_from_dict(self):
+        """Test configuration from dictionary."""
+        config_dict = {
+            "kafka": {
+                "bootstrap_servers": "kafka:9092",
+                "topic": "test_topic",
+            },
+            "database": {
+                "host": "db.example.com",
+                "database": "test_db",
+            },
+            "snapshot": {
+                "interval_seconds": 600,
+            },
+        }
+        
+        config = Config.from_dict(config_dict)
+        
+        self.assertEqual(config.kafka.bootstrap_servers, "kafka:9092")
+        self.assertEqual(config.kafka.topic, "test_topic")
+        self.assertEqual(config.database.host, "db.example.com")
+        self.assertEqual(config.snapshot.interval_seconds, 600)
+    
+    def test_from_file(self):
+        """Test configuration from JSON file."""
+        config_dict = {
+            "kafka": {
+                "bootstrap_servers": "kafka:9092",
+                "topic": "file_topic",
+            },
+            "database": {
+                "host": "filedb.example.com",
+            },
+        }
+        
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(config_dict, f)
+            temp_file = f.name
+        
+        try:
+            config = Config.from_file(temp_file)
+            
+            self.assertEqual(config.kafka.bootstrap_servers, "kafka:9092")
+            self.assertEqual(config.kafka.topic, "file_topic")
+            self.assertEqual(config.database.host, "filedb.example.com")
+        finally:
+            os.unlink(temp_file)
+    
+    def test_from_yaml_file(self):
+        """Test configuration from YAML file."""
+        import yaml
+        
+        config_dict = {
+            "kafka": {
+                "bootstrap_servers": "kafka:9092",
+                "topic": "yaml_topic",
+            },
+            "database": {
+                "host": "yamldb.example.com",
+            },
+        }
+        
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(config_dict, f)
+            temp_file = f.name
+        
+        try:
+            config = Config.from_file(temp_file)
+            
+            self.assertEqual(config.kafka.bootstrap_servers, "kafka:9092")
+            self.assertEqual(config.kafka.topic, "yaml_topic")
+            self.assertEqual(config.database.host, "yamldb.example.com")
+        finally:
+            if os.path.exists(temp_file):
+                os.unlink(temp_file)
+    
+    def test_from_file_not_found(self):
+        """Test error when config file doesn't exist."""
+        with self.assertRaises(FileNotFoundError):
+            Config.from_file("/nonexistent/config.json")
+    
+    def test_validate_success(self):
+        """Test validation with valid configuration."""
+        config = Config()
+        
+        # Should not raise any exception
+        config.validate()
+    
+    def test_validate_empty_bootstrap_servers(self):
+        """Test validation fails with empty bootstrap servers."""
+        config = Config()
+        config.kafka.bootstrap_servers = ""
+        
+        with self.assertRaises(ValueError) as context:
+            config.validate()
+        
+        self.assertIn("bootstrap_servers", str(context.exception))
+    
+    def test_validate_empty_topic(self):
+        """Test validation fails with empty topic."""
+        config = Config()
+        config.kafka.topic = ""
+        
+        with self.assertRaises(ValueError) as context:
+            config.validate()
+        
+        self.assertIn("topic", str(context.exception))
+    
+    def test_validate_timeout_exceeds_interval(self):
+        """Test validation fails when timeout exceeds interval."""
+        config = Config()
+        config.snapshot.interval_seconds = 100
+        config.snapshot.processing_timeout_seconds = 200
+        
+        with self.assertRaises(ValueError) as context:
+            config.validate()
+        
+        self.assertIn("timeout", str(context.exception).lower())
+
+
+if __name__ == "__main__":
+    unittest.main()
